@@ -163,7 +163,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     # 5) Dates
     if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["date"] = pd.to_datetime(df["date"], errors="coerce", dayfirst=True)
 
     # 6) Coerce rate to percentages
     if "rate" in df.columns:
