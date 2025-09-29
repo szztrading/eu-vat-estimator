@@ -2,16 +2,16 @@
 # -*- coding: utf-8 -*-
 """
 Robust Amazon report normalizer:
-- Do safe base renames (exclude country-related to avoid duplicated 'country').
+- Safe base renames (excluding country-related names to avoid duplicate 'country').
 - Build a single 'country' column by priority from multiple raw columns.
-- Standardize 'vat_collector' to AMAZON/SELLER (MARKETPLACE -> AMAZON).
-- Parse dates, coerce rates to percentages, and amounts to numeric.
+- Standardize 'vat_collector' to AMAZON/SELLER (MARKETPLACE/MPF/PLATFORM -> AMAZON).
+- Parse dates with dayfirst=True, coerce rates to percentages, and amounts to numeric.
 - Infer 'channel' from 'sales_channel' (AFN->FBA, MFN->FBM) when possible.
 - Fallbacks for order_id and country (from marketplace suffix) included.
 """
 
-import pandas as pd
 from typing import List
+import pandas as pd
 
 # Safe base rename map (do NOT put country-related names here)
 BASE_MAP = {
@@ -44,7 +44,7 @@ BASE_MAP = {
     "total_activity_value_amt_vat_incl": "gross",
     "total_activity_value_vat_amt": "vat_amount",
 
-    # other VAT components (kept for reference)
+    # other VAT components (optional)
     "price_of_items_vat_amt": "vat_amount_items",
     "total_price_of_items_vat_amt": "vat_amount_items_total",
     "ship_charge_vat_amt": "vat_amount_shipping",
@@ -81,6 +81,7 @@ def _coerce_rate_col(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.strip()
     pct = s.str.extract(r"([0-9]*\.?[0-9]+)\s*%?")[0]
     s_num = pd.to_numeric(pct, errors="coerce")
+    # 0-1 as fraction -> percentage
     s_num = s_num.where(~((s_num >= 0) & (s_num <= 1)), s_num * 100.0)
     return s_num
 
@@ -88,8 +89,10 @@ def _first_nonempty_rowwise(df_sub: pd.DataFrame) -> pd.Series:
     """Return first non-empty value per row across given columns."""
     if df_sub.empty:
         return pd.Series([None] * len(df_sub), index=df_sub.index)
-    # bfill along columns then take first column
-    return df_sub.apply(lambda row: next((x for x in row if pd.notna(x) and str(x).strip() != ""), None), axis=1)
+    return df_sub.apply(
+        lambda row: next((x for x in row if pd.notna(x) and str(x).strip() != ""), None),
+        axis=1
+    )
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -97,7 +100,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     - Safe base renames (no country renames here).
     - Create a single 'country' column from priority sources.
     - Standardize vat_collector to AMAZON/SELLER.
-    - Coerce dates, rates, numeric amounts.
+    - Coerce dates (dayfirst=True), rates, numeric amounts.
     - Infer channel from sales_channel.
     - Fallbacks for order_id and country.
     """
@@ -109,7 +112,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     mapping = {lower_map[k]: v for k, v in BASE_MAP.items() if k in lower_map}
     df = df.rename(columns=mapping)
 
-    # 2) Build a single 'country' column by priority from original columns
+    # 2) Build a single 'country' by priority from original columns
     country_candidates = []
     for raw_name in COUNTRY_PRIORITY:
         if raw_name in original_cols:
@@ -133,35 +136,33 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["country"] = "UNKNOWN"
 
-    # 3) Normalize vat_collector to AMAZON / SELLER
-    # --- 标准化 vat_collector 为 AMAZON / SELLER ---
-if "vat_collector" in df.columns:
-    vc_raw = df["vat_collector"].astype(str).str.upper().str.strip()
+    # 3) Standardize vat_collector to AMAZON / SELLER
+    if "vat_collector" in df.columns:
+        vc_raw = df["vat_collector"].astype(str).str.upper().str.strip()
 
-    # 先做一些常见别名的直接替换
-    vc = vc_raw.replace({
-        "AMAZON EU S.A R.L.": "AMAZON",
-        "AMAZON EU SARL": "AMAZON",
-        "AMAZON SERVICES EUROPE SARL": "AMAZON",
-        "MARKETPLACE": "AMAZON",
-        "MARKETPLACE FACILITATOR": "AMAZON",
-        "AMAZON - MARKETPLACE FACILITATOR": "AMAZON",
-        "MPF": "AMAZON",            # Marketplace Facilitator 缩写
-        "PLATFORM": "AMAZON",       # 有的报表会写 Platform
-    })
+        # Direct replacements for common variants
+        vc = vc_raw.replace({
+            "AMAZON EU S.A R.L.": "AMAZON",
+            "AMAZON EU SARL": "AMAZON",
+            "AMAZON SERVICES EUROPE SARL": "AMAZON",
+            "MARKETPLACE": "AMAZON",
+            "MARKETPLACE FACILITATOR": "AMAZON",
+            "AMAZON - MARKETPLACE FACILITATOR": "AMAZON",
+            "MPF": "AMAZON",        # Marketplace Facilitator
+            "PLATFORM": "AMAZON",
+        })
 
-    # 只要包含这些关键词之一，就判定为 AMAZON（平台代收）
-    platform_kw = r"(AMAZON|MARKETPLACE|FACILITATOR|MPF|PLATFORM)"
-    is_platform = vc.astype(str).str.contains(platform_kw, na=False, regex=True)
+        # Any value containing these keywords -> AMAZON
+        platform_kw = r"(AMAZON|MARKETPLACE|FACILITATOR|MPF|PLATFORM)"
+        is_platform = vc.astype(str).str.contains(platform_kw, na=False, regex=True)
+        vc = vc.where(~is_platform, "AMAZON")
 
-    # 默认 SELLER；匹配到平台关键词的强制标记为 AMAZON
-    vc = vc.where(~is_platform, "AMAZON")
-    vc = vc.replace({"NAN": None, "": None}).fillna("SELLER")
+        # Empty -> SELLER
+        vc = vc.replace({"NAN": None, "": None}).fillna("SELLER")
 
-    df["vat_collector"] = vc
-else:
-    df["vat_collector"] = "SELLER"
-
+        df["vat_collector"] = vc
+    else:
+        df["vat_collector"] = "SELLER"
 
     # 4) Infer channel from sales_channel (AFN -> FBA, MFN -> FBM)
     if "sales_channel" in df.columns and "channel" not in df.columns:
@@ -172,7 +173,7 @@ else:
     elif "channel" not in df.columns:
         df["channel"] = "UNKNOWN"
 
-    # 5) Dates
+    # 5) Dates (explicit dayfirst=True to match dd-mm-YYYY formats)
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce", dayfirst=True)
 
