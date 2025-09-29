@@ -117,12 +117,27 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     # 3) 补充/清洗其他字段
     # vat_collector 规范化为 AMAZON / SELLER
-    if "vat_collector" in df.columns:
-        vc = df["vat_collector"].astype(str).str.upper().str.strip()
-        vc = vc.replace({"AMAZON EU S.A R.L.": "AMAZON", "AMAZON EU SARL": "AMAZON"})
-        df["vat_collector"] = vc
-    else:
-        df["vat_collector"] = "SELLER"
+if "vat_collector" in df.columns:
+    vc = df["vat_collector"].astype(str).str.upper().str.strip()
+
+    # 常见写法统一
+    vc = vc.replace({
+        "AMAZON EU S.A R.L.": "AMAZON",
+        "AMAZON EU SARL": "AMAZON",
+        "AMAZON SERVICES EUROPE SARL": "AMAZON",
+        "MARKETPLACE": "AMAZON",                     # 关键：把 MARKETPLACE 视作平台代收
+        "MARKETPLACE FACILITATOR": "AMAZON",
+        "AMAZON - MARKETPLACE FACILITATOR": "AMAZON",
+    })
+
+    # 只要包含 AMAZON 字样，一律认定为 AMAZON
+    vc = vc.apply(lambda x: "AMAZON" if "AMAZON" in x else x)
+
+    # 空/NaN → 默认为 SELLER
+    vc = vc.replace({"NAN": None, "": None})
+    df["vat_collector"] = vc.fillna("SELLER")
+else:
+    df["vat_collector"] = "SELLER"
 
     # 从 sales_channel 推断 channel（AFN=FBA, MFN=FBM）
     if "sales_channel" in df.columns and "channel" not in df.columns:
