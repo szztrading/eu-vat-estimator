@@ -58,7 +58,7 @@ if uploaded:
         df = df[(df["date"] >= start) & (df["date"] < end)]
 
     st.subheader("Country VAT summary")
-    try:
+try:
     summary = country_summary(df)
 except KeyError as e:
     st.error(f"数据缺少关键字段：{e}")
@@ -68,6 +68,7 @@ except KeyError as e:
     st.stop()
 
 st.dataframe(summary, use_container_width=True)
+
 
 
     st.download_button(
