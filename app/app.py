@@ -12,6 +12,7 @@ import streamlit as st
 import pandas as pd
 import yaml
 from datetime import datetime
+from io import BytesIO
 
 # Local imports (do NOT use "app." prefix when this file sits inside app/)
 from vat_calculator import apply_country_rates, derive_net_gross, country_summary
@@ -20,7 +21,7 @@ from parsers.amazon import normalize_columns
 # ---------- Page config ----------
 st.set_page_config(page_title="EU VAT Estimator", layout="wide")
 st.title("EU VAT Estimator (Amazon FBA/FBM)")
-st.caption("v0.2 - Upload Amazon CSV/XLSX, auto-calc EU VAT; UK excluded by default")
+st.caption("v0.3 - Upload Amazon CSV/XLSX, auto-calc EU VAT; UK excluded by default")
 
 # ---------- Config loader ----------
 @st.cache_data
@@ -45,13 +46,17 @@ with col2:
 # ---------- Main ----------
 if uploaded:
     # 1) Read file
-    if uploaded.name.lower().endswith(".csv"):
-        df = pd.read_csv(uploaded)
-    else:
-        df = pd.read_excel(uploaded)
+    try:
+        if uploaded.name.lower().endswith(".csv"):
+            df = pd.read_csv(uploaded)
+        else:
+            df = pd.read_excel(uploaded)
+    except Exception as e:
+        st.error(f"Failed to read file: {e}")
+        st.stop()
 
     st.subheader("Raw preview")
-    st.dataframe(df.head(50), use_container_width=True)
+    st.dataframe(df.head(50), width="stretch")
 
     # 2) Normalize + rates + net/gross/vat derivation
     df = normalize_columns(df)
@@ -74,3 +79,43 @@ if uploaded:
         summary = country_summary(df)
     except KeyError as e:
         st.error(f"Missing required column: {e}")
+        st.info("Check if 'country' and 'vat_amount' exist (or can be derived).")
+        st.write("Normalized data (first 50 rows):")
+        st.dataframe(df.head(50), width="stretch")
+        st.stop()
+
+    st.dataframe(summary, width="stretch")
+
+    # 6) Download buttons (CSV + Excel)
+    # 6a) CSV
+    csv_bytes = summary.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download VAT summary (CSV)",
+        data=csv_bytes,
+        file_name="vat_summary.csv",
+        mime="text/csv",
+        type="primary",
+    )
+
+    # 6b) Excel with two sheets: Summary + NormalizedDataSample
+    try:
+        bio = BytesIO()
+        with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+            summary.to_excel(writer, index=False, sheet_name="Summary")
+            df.head(1000).to_excel(writer, index=False, sheet_name="NormalizedDataSample")
+        bio.seek(0)
+        st.download_button(
+            "Download VAT report (Excel)",
+            data=bio,
+            file_name="vat_report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    except Exception as e:
+        st.warning(f"Excel export failed: {e}")
+
+    # 7) Debug/inspection
+    with st.expander("Normalized data (first 200 rows)"):
+        st.dataframe(df.head(200), width="stretch")
+
+else:
+    st.info("Upload an Amazon report to start.")
