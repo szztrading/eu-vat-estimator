@@ -68,9 +68,6 @@ except KeyError as e:
     st.stop()
 
 st.dataframe(summary, use_container_width=True)
-
-
-
     st.download_button(
         "⬇️ Download summary (CSV)",
         summary.to_csv(index=False).encode("utf-8"),
