@@ -1,3 +1,14 @@
+# —— 放在文件最顶端 —— #
+import sys, os
+HERE = os.path.dirname(__file__)               # .../app
+ROOT = os.path.dirname(HERE)                   # 仓库根目录
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+# —— 顶部注入结束 —— #
+
+
 import streamlit as st
 import pandas as pd
 import yaml
