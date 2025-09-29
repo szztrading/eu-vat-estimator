@@ -1,18 +1,28 @@
 from __future__ import annotations
 import pandas as pd
 
-def apply_country_rates(df: pd.DataFrame, rates: dict) -> pd.DataFrame:
-    """按国家匹配标准税率，追加 'rate'(%) 列（若已有 rate 列则只在缺失处补齐）"""
-    df = df.copy()
+def _dedupe_country(df: pd.DataFrame) -> pd.DataFrame:
+    """若意外产生多个名为 'country' 的列，按行取第一个非空，并收敛为单列。"""
+    cols = [c for c in df.columns if c == "country"]
+    if len(cols) <= 1:
+        return df
+    cdf = df[cols]
+    # 逐行取第一个非空
+    country = cdf.bfill(axis=1).iloc[:, 0]
+    df = df.drop(columns=cols)
+    df["country"] = country
+    return df
 
-    # ✅ 修复：如果没有 'country' 列，先创建一列 UNKNOWN，避免 .get 返回 str
+def apply_country_rates(df: pd.DataFrame, rates: dict) -> pd.DataFrame:
+    """按国家匹配标准税率，追加 'rate'(%) 列"""
+    df = df.copy()
+    df = _dedupe_country(df)
+
     if "country" not in df.columns:
         df["country"] = "UNKNOWN"
 
-    # 统一大写
     df["country"] = df["country"].astype(str).str.upper()
 
-    # 匹配税率（优先用已有 rate，其次用国家映射）
     rates_map = {k.upper(): v for k, v in rates.items()}
 
     if "rate" not in df.columns:
@@ -23,49 +33,33 @@ def apply_country_rates(df: pd.DataFrame, rates: dict) -> pd.DataFrame:
 
     return df
 
-
 def derive_net_gross(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    尽最大努力推导净额/含税额/税额：
-    - 若有 net + vat_amount → gross = net + vat_amount
-    - 若有 gross + vat_amount → net = gross - vat_amount
-    - 若缺 vat_amount 且有 net + rate → vat_amount = net * rate%
-    - 若缺 vat_amount 且有 gross + rate → vat_amount = gross - gross/(1+rate%)
-    - 若没有 net 且有 gross + vat_amount → 反推 net
-    """
     df = df.copy()
-
-    # 转数值
     for col in ["net", "gross", "vat_amount", "rate"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # 1️⃣ 税额推导
     if "gross" not in df.columns and {"net", "vat_amount"}.issubset(df.columns):
         df["gross"] = df["net"] + df["vat_amount"]
 
     if "net" not in df.columns and {"gross", "vat_amount"}.issubset(df.columns):
         df["net"] = df["gross"] - df["vat_amount"]
 
-    # 2️⃣ 税率推导
     if "vat_amount" not in df.columns and "rate" in df.columns:
         if "net" in df.columns:
             df["vat_amount"] = df["net"] * (df["rate"] / 100.0)
         elif "gross" in df.columns:
             df["vat_amount"] = df["gross"] - (df["gross"] / (1.0 + df["rate"] / 100.0))
 
-    # 3️⃣ 再反推净额
     if "net" not in df.columns and {"gross", "vat_amount"}.issubset(df.columns):
         df["net"] = df["gross"] - df["vat_amount"]
 
     return df
 
-
 def country_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """按国家聚合：订单数、净额、应纳VAT、Amazon代扣、需申报VAT"""
     df = df.copy()
+    df = _dedupe_country(df)
 
-    # 校验
     if "country" not in df.columns:
         raise KeyError("Missing required column 'country'. Please check normalization mapping.")
 
@@ -75,20 +69,17 @@ def country_summary(df: pd.DataFrame) -> pd.DataFrame:
 
     g = df.groupby("country", dropna=True)
 
-    # 订单数
     if "order_id" in df.columns:
         orders_df = g["order_id"].nunique().reset_index(name="orders")
     else:
         orders_df = g.size().reset_index(name="orders")
 
-    # 净额兜底
     if "net" in df.columns:
         net_agg = ("net", "sum")
     else:
         df["__net_fallback__"] = 0.0
         net_agg = ("__net_fallback__", "sum")
 
-    # 检查 VAT 字段
     if "vat_amount" not in df.columns:
         raise KeyError("Missing required column 'vat_amount'. Ensure normalization mapped correctly or derive_net_gross() worked.")
 
