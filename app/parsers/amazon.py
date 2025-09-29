@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 Robust Amazon report normalizer:
-- Safe base renames (excluding country-related names to avoid duplicate 'country').
-- Build a single 'country' column by priority from multiple raw columns.
+- Safe base renames (exclude country-related names to avoid duplicate 'country').
+- Build a single 'country' column from prioritized raw columns.
 - Standardize 'vat_collector' to AMAZON/SELLER (MARKETPLACE/MPF/PLATFORM -> AMAZON).
-- Parse dates with dayfirst=True, coerce rates to percentages, and amounts to numeric.
+- Parse dates with dayfirst=True; coerce rates to %; amounts to numeric.
 - Infer 'channel' from 'sales_channel' (AFN->FBA, MFN->FBM) when possible.
 - Fallbacks for order_id and country (from marketplace suffix) included.
 """
@@ -33,18 +33,18 @@ BASE_MAP = {
     "fulfillment-channel": "channel",
     "fulfilment-channel": "channel",
 
-    # vat collector
+    # vat collector (map raw columns onto a unified 'vat_collector')
     "vat-collection-responsible": "vat_collector",
     "vat collection responsibility": "vat_collector",
     "tax_collection_responsibility": "vat_collector",
     "tax_collection_role": "vat_collector",
 
-    # totals (preferred in VAT calc reports)
+    # totals (VAT calc reports)
     "total_activity_value_amt_vat_excl": "net",
     "total_activity_value_amt_vat_incl": "gross",
     "total_activity_value_vat_amt": "vat_amount",
 
-    # other VAT components (optional)
+    # optional components
     "price_of_items_vat_amt": "vat_amount_items",
     "total_price_of_items_vat_amt": "vat_amount_items_total",
     "ship_charge_vat_amt": "vat_amount_shipping",
@@ -52,7 +52,7 @@ BASE_MAP = {
     "gift_wrap_vat_amt": "vat_amount_giftwrap",
     "total_gift_wrap_vat_amt": "vat_amount_giftwrap_total",
 
-    # rates (will be coerced to percentages)
+    # rates
     "tax-rate": "rate",
     "tax rate": "rate",
     "vat rate": "rate",
@@ -65,6 +65,7 @@ BASE_MAP = {
 
     # sales channel (AFN/MFN)
     "sales_channel": "sales_channel",
+    "channel": "channel",
 }
 
 # Country source priority (raw column names as in Amazon exports)
@@ -77,16 +78,16 @@ COUNTRY_PRIORITY: List[str] = [
 ]
 
 def _coerce_rate_col(series: pd.Series) -> pd.Series:
-    """Normalize rate to percentage (e.g., 19 -> 19.0, 0.19 -> 19.0, '19%' -> 19.0)."""
+    """Normalize rate to percentage (19 -> 19.0; 0.19 -> 19.0; '19%' -> 19.0)."""
     s = series.astype(str).str.strip()
     pct = s.str.extract(r"([0-9]*\.?[0-9]+)\s*%?")[0]
     s_num = pd.to_numeric(pct, errors="coerce")
-    # 0-1 as fraction -> percentage
+    # If looks like fraction (0-1), convert to %
     s_num = s_num.where(~((s_num >= 0) & (s_num <= 1)), s_num * 100.0)
     return s_num
 
 def _first_nonempty_rowwise(df_sub: pd.DataFrame) -> pd.Series:
-    """Return first non-empty value per row across given columns."""
+    """Return first non-empty (non-blank) value per row across given columns."""
     if df_sub.empty:
         return pd.Series([None] * len(df_sub), index=df_sub.index)
     return df_sub.apply(
@@ -154,8 +155,9 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
         # Any value containing these keywords -> AMAZON
         platform_kw = r"(AMAZON|MARKETPLACE|FACILITATOR|MPF|PLATFORM)"
-        is_platform = vc.astype(str).str.contains(platform_kw, na=False, regex=True)
-        vc = vc.where(~is_platform, "AMAZON")
+        if hasattr(vc, "str"):
+            is_platform = vc.astype(str).str.contains(platform_kw, na=False, regex=True)
+            vc = vc.where(~is_platform, "AMAZON")
 
         # Empty -> SELLER
         vc = vc.replace({"NAN": None, "": None}).fillna("SELLER")
