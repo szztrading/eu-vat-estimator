@@ -58,8 +58,17 @@ if uploaded:
         df = df[(df["date"] >= start) & (df["date"] < end)]
 
     st.subheader("Country VAT summary")
+    try:
     summary = country_summary(df)
-    st.dataframe(summary, use_container_width=True)
+except KeyError as e:
+    st.error(f"数据缺少关键字段：{e}")
+    st.info("请检查：是否存在 'country'、'vat_amount'（或能推导出），以及是否已通过 normalize_columns/derive_net_gross 处理。")
+    st.write("以下为标准化后的前 50 行，便于排查：")
+    st.dataframe(df.head(50), use_container_width=True)
+    st.stop()
+
+st.dataframe(summary, use_container_width=True)
+
 
     st.download_button(
         "⬇️ Download summary (CSV)",
