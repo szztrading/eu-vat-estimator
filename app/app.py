@@ -2,8 +2,9 @@ import streamlit as st
 import pandas as pd
 import yaml
 from datetime import datetime
-from vat_calculator import apply_country_rates, derive_net_gross, country_summary
-from parsers.amazon import normalize_columns
+
+from app.vat_calculator import apply_country_rates, derive_net_gross, country_summary
+from app.parsers.amazon import normalize_columns
 
 st.set_page_config(page_title="EU VAT Estimator", layout="wide")
 st.title("🇪🇺 EU VAT Estimator (Amazon FBA/FBM)")
