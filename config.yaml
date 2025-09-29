@@ -1,0 +1,19 @@
+countries:
+  DE:
+    standard_rate: 19
+  FR:
+    standard_rate: 20
+  IT:
+    standard_rate: 22
+  ES:
+    standard_rate: 21
+  NL:
+    standard_rate: 21
+
+oss:
+  threshold_eur: 10000
+  enabled: true
+
+ui:
+  currency_display: "mixed"  # mixed | EUR | GBP
+  hide_uk: true
