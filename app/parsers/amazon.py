@@ -1,9 +1,21 @@
-import pandas as pd
-import re
+# app/parsers/amazon.py
+# -*- coding: utf-8 -*-
+"""
+Robust Amazon report normalizer:
+- Do safe base renames (exclude country-related to avoid duplicated 'country').
+- Build a single 'country' column by priority from multiple raw columns.
+- Standardize 'vat_collector' to AMAZON/SELLER (MARKETPLACE -> AMAZON).
+- Parse dates, coerce rates to percentages, and amounts to numeric.
+- Infer 'channel' from 'sales_channel' (AFN->FBA, MFN->FBM) when possible.
+- Fallbacks for order_id and country (from marketplace suffix) included.
+"""
 
-# 仅做“安全”的基础映射；国家(country)相关不在这里直接重命名，避免重复列
+import pandas as pd
+from typing import List
+
+# Safe base rename map (do NOT put country-related names here)
 BASE_MAP = {
-    # 标识/时间
+    # identity / dates
     "order-id": "order_id",
     "order id": "order_id",
     "amazon-order-id": "order_id",
@@ -17,21 +29,22 @@ BASE_MAP = {
     "shipment-date": "date",
     "tax_calculation_date": "date",
 
-    # 履约渠道
+    # fulfillment
     "fulfillment-channel": "channel",
     "fulfilment-channel": "channel",
 
-    # VAT 代扣方（统一为 vat_collector）
+    # vat collector
     "vat-collection-responsible": "vat_collector",
     "vat collection responsibility": "vat_collector",
     "tax_collection_responsibility": "vat_collector",
+    "tax_collection_role": "vat_collector",
 
-    # 金额（总额三件套）
+    # totals (preferred in VAT calc reports)
     "total_activity_value_amt_vat_excl": "net",
     "total_activity_value_amt_vat_incl": "gross",
     "total_activity_value_vat_amt": "vat_amount",
 
-    # 其它分项（保留为参考，不参与核心计算）
+    # other VAT components (kept for reference)
     "price_of_items_vat_amt": "vat_amount_items",
     "total_price_of_items_vat_amt": "vat_amount_items_total",
     "ship_charge_vat_amt": "vat_amount_shipping",
@@ -39,7 +52,7 @@ BASE_MAP = {
     "gift_wrap_vat_amt": "vat_amount_giftwrap",
     "total_gift_wrap_vat_amt": "vat_amount_giftwrap_total",
 
-    # 税率
+    # rates (will be coerced to percentages)
     "tax-rate": "rate",
     "tax rate": "rate",
     "vat rate": "rate",
@@ -47,15 +60,15 @@ BASE_MAP = {
     "vat_rate": "rate",
     "price_of_items_vat_rate_percent": "rate",
 
-    # 货币
+    # currency
     "currency": "currency",
 
-    # 销售渠道（AFN=FBA, MFN=FBM）
-    "sales_channel": "sales_channel"
+    # sales channel (AFN/MFN)
+    "sales_channel": "sales_channel",
 }
 
-# 国家来源列的优先级（出现就用，不出现就找下一个）
-COUNTRY_PRIORITY = [
+# Country source priority (raw column names as in Amazon exports)
+COUNTRY_PRIORITY: List[str] = [
     "VAT_CALCULATION_IMPUTATION_COUNTRY",
     "ARRIVAL_COUNTRY",
     "SALE_ARRIVAL_COUNTRY",
@@ -64,7 +77,7 @@ COUNTRY_PRIORITY = [
 ]
 
 def _coerce_rate_col(series: pd.Series) -> pd.Series:
-    """把税率统一为百分数：19 -> 19.0, 0.19 -> 19.0, '19%' -> 19.0"""
+    """Normalize rate to percentage (e.g., 19 -> 19.0, 0.19 -> 19.0, '19%' -> 19.0)."""
     s = series.astype(str).str.strip()
     pct = s.str.extract(r"([0-9]*\.?[0-9]+)\s*%?")[0]
     s_num = pd.to_numeric(pct, errors="coerce")
@@ -72,26 +85,31 @@ def _coerce_rate_col(series: pd.Series) -> pd.Series:
     return s_num
 
 def _first_nonempty_rowwise(df_sub: pd.DataFrame) -> pd.Series:
-    """按行取第一个非空/非空字符串的值。"""
+    """Return first non-empty value per row across given columns."""
     if df_sub.empty:
         return pd.Series([None] * len(df_sub), index=df_sub.index)
-    s = df_sub.apply(
-        lambda row: next((x for x in row if pd.notna(x) and str(x).strip() != ""), None),
-        axis=1
-    )
-    return s
+    # bfill along columns then take first column
+    return df_sub.apply(lambda row: next((x for x in row if pd.notna(x) and str(x).strip() != ""), None), axis=1)
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """标准化列名 + 生成唯一 country 列 + 补全必要字段"""
+    """
+    Best-effort normalization:
+    - Safe base renames (no country renames here).
+    - Create a single 'country' column from priority sources.
+    - Standardize vat_collector to AMAZON/SELLER.
+    - Coerce dates, rates, numeric amounts.
+    - Infer channel from sales_channel.
+    - Fallbacks for order_id and country.
+    """
     df = df.copy()
     original_cols = list(df.columns)
     lower_map = {c.lower(): c for c in original_cols}
 
-    # 1) 先做基础映射（不含 country 相关）
+    # 1) Safe base renames
     mapping = {lower_map[k]: v for k, v in BASE_MAP.items() if k in lower_map}
     df = df.rename(columns=mapping)
 
-    # 2) 生成唯一的 country 列（按优先级从原始列里抽取）
+    # 2) Build a single 'country' column by priority from original columns
     country_candidates = []
     for raw_name in COUNTRY_PRIORITY:
         if raw_name in original_cols:
@@ -103,11 +121,11 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         country_series = _first_nonempty_rowwise(df[country_candidates])
         df["country"] = country_series
     else:
-        # 兜底：尝试从 marketplace 推断（最后两位）
+        # Fallback: derive from 'marketplace' suffix if available (e.g., 'Amazon.de' -> 'DE')
         if "marketplace" in df.columns:
             df["country"] = df["marketplace"].astype(str).str[-2:].str.upper()
 
-    # 统一国家格式
+    # Normalize 'country'
     if "country" in df.columns:
         df["country"] = df["country"].astype(str).str.strip().str.upper()
         df["country"] = df["country"].replace({"NAN": None, "NONE": None, "": None})
@@ -115,58 +133,55 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["country"] = "UNKNOWN"
 
-    # 3) 补充/清洗其他字段
-    # vat_collector 规范化为 AMAZON / SELLER
-if "vat_collector" in df.columns:
-    vc = df["vat_collector"].astype(str).str.upper().str.strip()
+    # 3) Normalize vat_collector to AMAZON / SELLER
+    if "vat_collector" in df.columns:
+        vc = df["vat_collector"].astype(str).str.upper().str.strip()
+        vc = vc.replace({
+            "AMAZON EU S.A R.L.": "AMAZON",
+            "AMAZON EU SARL": "AMAZON",
+            "AMAZON SERVICES EUROPE SARL": "AMAZON",
+            "MARKETPLACE": "AMAZON",
+            "MARKETPLACE FACILITATOR": "AMAZON",
+            "AMAZON - MARKETPLACE FACILITATOR": "AMAZON",
+        })
+        # any value containing 'AMAZON' -> AMAZON
+        vc = vc.apply(lambda x: "AMAZON" if "AMAZON" in x else x)
+        # empty -> SELLER
+        vc = vc.replace({"NAN": None, "": None})
+        df["vat_collector"] = vc.fillna("SELLER")
+    else:
+        df["vat_collector"] = "SELLER"
 
-    # 常见写法统一
-    vc = vc.replace({
-        "AMAZON EU S.A R.L.": "AMAZON",
-        "AMAZON EU SARL": "AMAZON",
-        "AMAZON SERVICES EUROPE SARL": "AMAZON",
-        "MARKETPLACE": "AMAZON",                     # 关键：把 MARKETPLACE 视作平台代收
-        "MARKETPLACE FACILITATOR": "AMAZON",
-        "AMAZON - MARKETPLACE FACILITATOR": "AMAZON",
-    })
-
-    # 只要包含 AMAZON 字样，一律认定为 AMAZON
-    vc = vc.apply(lambda x: "AMAZON" if "AMAZON" in x else x)
-
-    # 空/NaN → 默认为 SELLER
-    vc = vc.replace({"NAN": None, "": None})
-    df["vat_collector"] = vc.fillna("SELLER")
-else:
-    df["vat_collector"] = "SELLER"
-
-    # 从 sales_channel 推断 channel（AFN=FBA, MFN=FBM）
+    # 4) Infer channel from sales_channel (AFN -> FBA, MFN -> FBM)
     if "sales_channel" in df.columns and "channel" not in df.columns:
         df["channel"] = df["sales_channel"].astype(str).str.upper().map({
-            "AFN": "FBA",  # Amazon Fulfillment Network
-            "MFN": "FBM"
+            "AFN": "FBA",
+            "MFN": "FBM",
         }).fillna("UNKNOWN")
     elif "channel" not in df.columns:
         df["channel"] = "UNKNOWN"
 
-    # 时间列
+    # 5) Dates
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
 
-    # 税率转为百分数
+    # 6) Coerce rate to percentages
     if "rate" in df.columns:
         df["rate"] = _coerce_rate_col(df["rate"])
 
-    # 金额列转数值
-    for col in ["net", "gross", "vat_amount",
-                "vat_amount_items", "vat_amount_items_total",
-                "vat_amount_shipping", "vat_amount_shipping_total",
-                "vat_amount_giftwrap", "vat_amount_giftwrap_total"]:
+    # 7) Numeric amounts
+    for col in [
+        "net", "gross", "vat_amount",
+        "vat_amount_items", "vat_amount_items_total",
+        "vat_amount_shipping", "vat_amount_shipping_total",
+        "vat_amount_giftwrap", "vat_amount_giftwrap_total",
+    ]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # 订单号兜底
+    # 8) order_id fallback (try a few common IDs if not present)
     if "order_id" not in df.columns:
-        for fallback in ["TRANSACTION_EVENT_ID", "ACTIVITY_TRANSACTION_ID"]:
+        for fallback in ["TRANSACTION_EVENT_ID", "ACTIVITY_TRANSACTION_ID", "ORDER_ID"]:
             if fallback in original_cols:
                 df["order_id"] = df[fallback]
                 break
