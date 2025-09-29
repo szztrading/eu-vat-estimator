@@ -134,23 +134,34 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         df["country"] = "UNKNOWN"
 
     # 3) Normalize vat_collector to AMAZON / SELLER
-    if "vat_collector" in df.columns:
-        vc = df["vat_collector"].astype(str).str.upper().str.strip()
-        vc = vc.replace({
-            "AMAZON EU S.A R.L.": "AMAZON",
-            "AMAZON EU SARL": "AMAZON",
-            "AMAZON SERVICES EUROPE SARL": "AMAZON",
-            "MARKETPLACE": "AMAZON",
-            "MARKETPLACE FACILITATOR": "AMAZON",
-            "AMAZON - MARKETPLACE FACILITATOR": "AMAZON",
-        })
-        # any value containing 'AMAZON' -> AMAZON
-        vc = vc.apply(lambda x: "AMAZON" if "AMAZON" in x else x)
-        # empty -> SELLER
-        vc = vc.replace({"NAN": None, "": None})
-        df["vat_collector"] = vc.fillna("SELLER")
-    else:
-        df["vat_collector"] = "SELLER"
+    # --- 标准化 vat_collector 为 AMAZON / SELLER ---
+if "vat_collector" in df.columns:
+    vc_raw = df["vat_collector"].astype(str).str.upper().str.strip()
+
+    # 先做一些常见别名的直接替换
+    vc = vc_raw.replace({
+        "AMAZON EU S.A R.L.": "AMAZON",
+        "AMAZON EU SARL": "AMAZON",
+        "AMAZON SERVICES EUROPE SARL": "AMAZON",
+        "MARKETPLACE": "AMAZON",
+        "MARKETPLACE FACILITATOR": "AMAZON",
+        "AMAZON - MARKETPLACE FACILITATOR": "AMAZON",
+        "MPF": "AMAZON",            # Marketplace Facilitator 缩写
+        "PLATFORM": "AMAZON",       # 有的报表会写 Platform
+    })
+
+    # 只要包含这些关键词之一，就判定为 AMAZON（平台代收）
+    platform_kw = r"(AMAZON|MARKETPLACE|FACILITATOR|MPF|PLATFORM)"
+    is_platform = vc.astype(str).str.contains(platform_kw, na=False, regex=True)
+
+    # 默认 SELLER；匹配到平台关键词的强制标记为 AMAZON
+    vc = vc.where(~is_platform, "AMAZON")
+    vc = vc.replace({"NAN": None, "": None}).fillna("SELLER")
+
+    df["vat_collector"] = vc
+else:
+    df["vat_collector"] = "SELLER"
+
 
     # 4) Infer channel from sales_channel (AFN -> FBA, MFN -> FBM)
     if "sales_channel" in df.columns and "channel" not in df.columns:
